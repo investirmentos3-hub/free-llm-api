@@ -1,0 +1,90 @@
+import express from 'express';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import { v4 as uuidv4 } from 'uuid';
+import db from '../db.js';
+import { config } from '../config.js';
+
+const router = express.Router();
+
+function signToken(user) {
+  return jwt.sign({ userId: user.id, email: user.email }, config.jwtSecret, { expiresIn: '7d' });
+}
+
+router.post('/register', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: 'Nome, email e senha são obrigatórios' });
+    }
+
+    const exists = db.prepare('SELECT 1 FROM users WHERE email = ?').get(email.toLowerCase());
+    if (exists) {
+      return res.status(409).json({ error: 'Usuário já existe' });
+    }
+
+    const id = uuidv4();
+    const passwordHash = await bcrypt.hash(password, 10);
+    const apiKey = `sk_${uuidv4().replace(/-/g, '')}`;
+
+    db.prepare(`
+      INSERT INTO users (id, name, email, password_hash, plan, api_key)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, name, email.toLowerCase(), passwordHash, 'free', apiKey);
+
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    const token = signToken(user);
+
+    return res.status(201).json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        plan: user.plan,
+        apiKey: user.api_key
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Erro ao registrar usuário', detail: err.message });
+  }
+});
+
+router.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email e senha são obrigatórios' });
+    }
+
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email.toLowerCase());
+    if (!user) {
+      return res.status(401).json({ error: 'Credenciais inválidas' });
+    }
+
+    const valid = await bcrypt.compare(password, user.password_hash);
+    if (!valid) {
+      return res.status(401).json({ error: 'Credenciais inválidas' });
+    }
+
+    const token = signToken(user);
+    return res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        plan: user.plan,
+        apiKey: user.api_key
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Erro ao fazer login', detail: err.message });
+  }
+});
+
+router.get('/me', async (req, res) => {
+  return res.json({ user: req.user });
+});
+
+export default router;

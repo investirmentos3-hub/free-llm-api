@@ -1,0 +1,23 @@
+import express from 'express';
+import db from '../db.js';
+
+const router = express.Router();
+
+router.get('/me', (req, res) => {
+  const user = db.prepare('SELECT id, name, email, plan, api_key FROM users WHERE id = ?').get(req.user.id);
+  return res.json({ user });
+});
+
+router.get('/usage', (req, res) => {
+  const conversations = db.prepare('SELECT COUNT(*) as total FROM conversations WHERE user_id = ?').get(req.user.id);
+  const messages = db.prepare('SELECT COUNT(*) as total FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)').get(req.user.id);
+
+  return res.json({
+    plan: req.user.plan,
+    apiKey: req.user.apiKey,
+    conversations: conversations.total,
+    messages: messages.total
+  });
+});
+
+export default router;
