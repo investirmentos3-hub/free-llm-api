@@ -1,0 +1,343 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+
+const STORAGE_KEY = 'free-llm-dashboard-state';
+const DEFAULT_API_URL = 'http://localhost:3000';
+
+const makeMessage = (role, content) => ({ role, content, timestamp: new Date().toISOString() });
+
+function App() {
+  const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('free-llm-api-url') || DEFAULT_API_URL);
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('free-llm-api-key') || '');
+  const [models, setModels] = useState([]);
+  const [selectedModel, setSelectedModel] = useState('llama3');
+  const [conversations, setConversations] = useState(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (!saved) return [];
+    try {
+      return JSON.parse(saved);
+    } catch {
+      return [];
+    }
+  });
+  const [activeConversationId, setActiveConversationId] = useState(null);
+  const [input, setInput] = useState('');
+  const [status, setStatus] = useState('Pronto');
+  const [isLoading, setIsLoading] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
+  const [theme, setTheme] = useState(() => localStorage.getItem('free-llm-theme') || 'dark');
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    localStorage.setItem('free-llm-api-url', apiUrl);
+  }, [apiUrl]);
+
+  useEffect(() => {
+    localStorage.setItem('free-llm-api-key', apiKey);
+  }, [apiKey]);
+
+  useEffect(() => {
+    document.body.dataset.theme = theme;
+    localStorage.setItem('free-llm-theme', theme);
+  }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
+  }, [conversations]);
+
+  useEffect(() => {
+    if (conversations.length && !activeConversationId) {
+      setActiveConversationId(conversations[0].id);
+    }
+  }, [conversations, activeConversationId]);
+
+  const activeConversation = useMemo(() => {
+    return conversations.find((c) => c.id === activeConversationId) || null;
+  }, [conversations, activeConversationId]);
+
+  const fetchModels = async () => {
+    try {
+      setStatus('Buscando modelos...');
+      const response = await fetch(`${apiUrl}/api/models`, {
+        headers: {
+          'X-API-Key': apiKey,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.error || 'Erro ao carregar modelos');
+      }
+
+      const data = await response.json();
+      const list = data?.data?.models || [];
+      if (list.length) {
+        setModels(list);
+        setSelectedModel(list[0].name || 'llama3');
+      }
+
+      setIsConnected(true);
+      setStatus('Conectado com sucesso');
+    } catch (error) {
+      setIsConnected(false);
+      setStatus(error.message || 'Falha ao conectar');
+      console.error(error);
+    }
+  };
+
+  const checkApiHealth = async () => {
+    try {
+      const response = await fetch(`${apiUrl}/health`);
+      if (!response.ok) {
+        setIsConnected(false);
+        setStatus('API indisponível');
+        return;
+      }
+
+      const data = await response.json();
+      setIsConnected(data?.status === 'ok' || data?.freeLLMAPI?.status === 'connected');
+      setStatus(data?.freeLLMAPI?.status === 'connected' ? 'API OK' : 'API em funcionamento');
+    } catch {
+      setIsConnected(false);
+      setStatus('API não encontrada');
+    }
+  };
+
+  useEffect(() => {
+    checkApiHealth();
+  }, [apiUrl]);
+
+  useEffect(() => {
+    if (apiUrl && apiKey) {
+      fetchModels();
+    }
+  }, [apiUrl, apiKey]);
+
+  const addConversation = (id, title) => {
+    setConversations((prev) => {
+      const exists = prev.some((c) => c.id === id);
+      if (exists) return prev;
+      return [{ id, title, messages: [] }, ...prev];
+    });
+    setActiveConversationId(id);
+  };
+
+  const handleSend = async () => {
+    const trimmed = input.trim();
+    if (!trimmed || !apiUrl || !apiKey) {
+      setStatus('Configure a URL e a API Key antes de enviar');
+      return;
+    }
+
+    const conversationId = activeConversationId || crypto.randomUUID();
+    const userMessage = makeMessage('user', trimmed);
+
+    setConversations((prev) => {
+      const existing = prev.find((c) => c.id === conversationId);
+      if (existing) {
+        return prev.map((c) =>
+          c.id === conversationId ? { ...c, title: c.title || trimmed.slice(0, 28), messages: [...c.messages, userMessage] } : c
+        );
+      }
+      return [{ id: conversationId, title: trimmed.slice(0, 28), messages: [userMessage] }, ...prev];
+    });
+
+    setActiveConversationId(conversationId);
+    setInput('');
+    setIsLoading(true);
+    setStatus('Enviando mensagem...');
+
+    try {
+      const response = await fetch(`${apiUrl}/api/chat`, {
+        method: 'POST',
+        headers: {
+          'X-API-Key': apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: trimmed,
+          model: selectedModel,
+          conversationId,
+        }),
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || 'Erro ao consultar IA');
+      }
+
+      const payload = await response.json();
+      const answer = payload?.data?.response || 'Sem resposta';
+      const assistantMessage = makeMessage('assistant', answer);
+
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === conversationId
+            ? { ...c, messages: [...c.messages, assistantMessage], title: c.title || trimmed.slice(0, 28) }
+            : c
+        )
+      );
+
+      setStatus('Resposta recebida');
+    } catch (error) {
+      const errorMessage = makeMessage('assistant', `Erro: ${error.message}`);
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === conversationId
+            ? { ...c, messages: [...c.messages, errorMessage] }
+            : c
+        )
+      );
+      setStatus(error.message || 'Erro ao processar');
+    } finally {
+      setIsLoading(false);
+      inputRef.current?.focus();
+    }
+  };
+
+  const handleNewChat = () => {
+    setActiveConversationId(null);
+    setInput('');
+    setStatus('Nova conversa criada');
+    inputRef.current?.focus();
+  };
+
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand-wrap">
+          <div className="brand-mark">AI</div>
+          <div>
+            <p className="eyebrow">Dashboard</p>
+            <h1>Free LLM</h1>
+          </div>
+        </div>
+
+        <button className="primary-btn" onClick={handleNewChat}>+ Nova conversa</button>
+
+        <div className="sidebar-section">
+          <h3>Conversas</h3>
+          <div className="conversation-list">
+            {conversations.length === 0 ? (
+              <p className="empty-state">Nenhuma conversa ainda.</p>
+            ) : (
+              conversations.map((conversation) => (
+                <button
+                  key={conversation.id}
+                  className={`conversation-item ${conversation.id === activeConversationId ? 'active' : ''}`}
+                  onClick={() => setActiveConversationId(conversation.id)}
+                >
+                  <span>{conversation.title || 'Nova conversa'}</span>
+                  <small>{conversation.messages.length} msgs</small>
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div className="sidebar-section settings-block">
+          <h3>Configurações</h3>
+
+          <label>
+            API URL
+            <input value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} />
+          </label>
+
+          <label>
+            API Key
+            <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="X-API-Key" />
+          </label>
+
+          <label>
+            Modelo
+            <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
+              {models.length === 0 ? (
+                <option value="llama3">llama3</option>
+              ) : (
+                models.map((model) => (
+                  <option key={model.name || model} value={model.name || model}>
+                    {model.name || model}
+                  </option>
+                ))
+              )}
+            </select>
+          </label>
+
+          <div className="toggle-row">
+            <button className="ghost-btn" onClick={fetchModels}>Atualizar modelos</button>
+            <button className="ghost-btn" onClick={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}>
+              {theme === 'dark' ? 'Modo claro' : 'Modo escuro'}
+            </button>
+          </div>
+
+          <div className={`status-pill ${isConnected ? 'online' : 'offline'}`}>
+            {isConnected ? 'Conectado' : 'Offline'}
+          </div>
+        </div>
+      </aside>
+
+      <main className="chat-panel">
+        <header className="chat-header">
+          <div>
+            <p className="eyebrow">Assistente IA</p>
+            <h2>{activeConversation ? activeConversation.title : 'Nova conversa'}</h2>
+          </div>
+          <div className="status-text">{status}</div>
+        </header>
+
+        <div className="messages">
+          {activeConversation && activeConversation.messages.length > 0 ? (
+            activeConversation.messages.map((message, index) => (
+              <div key={`${message.role}-${index}`} className={`message-row ${message.role}`}>
+                <div className="avatar">{message.role === 'user' ? 'U' : 'AI'}</div>
+                <div className="bubble">
+                  <pre>{message.content}</pre>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="empty-chat">
+              <h3>Pronto para começar</h3>
+              <p>Digite uma pergunta para iniciar uma conversa com a IA.</p>
+            </div>
+          )}
+
+          {isLoading && (
+            <div className="message-row assistant">
+              <div className="avatar">AI</div>
+              <div className="bubble typing">
+                <span />
+                <span />
+                <span />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="composer">
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Digite sua mensagem..."
+            rows={3}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                handleSend();
+              }
+            }}
+          />
+          <div className="composer-actions">
+            <span>Modelo: {selectedModel}</span>
+            <button className="primary-btn" onClick={handleSend} disabled={isLoading || !input.trim()}>
+              {isLoading ? 'Enviando...' : 'Enviar'}
+            </button>
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+export default App;
