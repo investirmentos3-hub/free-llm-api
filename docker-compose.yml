@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - FREELLM_API_URL=http://freellm:8000
+      - JWT_SECRET=dev-secret-change-in-prod
+    volumes:
+      - ./backend/data:/app/data
+    depends_on:
+      - freellm
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:3000
+    depends_on:
+      - backend
+
+  freellm:
+    image: freellmapi:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - MODELS=llama3,mistral
+
+networks:
+  default:
+    name: free-llm-network
